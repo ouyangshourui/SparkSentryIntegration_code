@@ -19,24 +19,19 @@ package org.apache.spark.sql.hive
 
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
-import java.net.URI
+import java.net.{URI, URL}
 import java.util
-
-import scala.collection.mutable
-import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.hive.ql.metadata.HiveException
-import org.apache.thrift.TException
-
-import org.apache.spark.{SparkConf, SparkException}
+import org.apache.hadoop.security.UserGroupInformation
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException
-import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.catalog.ExternalCatalogUtils.escapePathName
+import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Statistics}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
@@ -46,25 +41,41 @@ import org.apache.spark.sql.hive.client.HiveClient
 import org.apache.spark.sql.internal.HiveSerDe
 import org.apache.spark.sql.internal.StaticSQLConf._
 import org.apache.spark.sql.types.{DataType, StructType}
+import org.apache.spark.{SparkConf, SparkException}
+import org.apache.thrift.TException
+
+import scala.collection.mutable
+import scala.collection.mutable.{ArrayBuffer, HashMap}
+import scala.util.control.NonFatal
 
 
 /**
- * A persistent implementation of the system catalog using Hive.
- * All public methods must be synchronized for thread-safety.
- */
+  * A persistent implementation of the system catalog using Hive.
+  * All public methods must be synchronized for thread-safety.
+  */
 private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configuration)
   extends ExternalCatalog with Logging {
 
+  import CatalogTableType._
   import CatalogTypes.TablePartitionSpec
   import HiveExternalCatalog._
-  import CatalogTableType._
 
   /**
-   * A Hive client used to interact with the metastore.
-   */
+    * A Hive client used to interact with the metastore.
+    */
   val client: HiveClient = {
     HiveUtils.newClientForMetadata(conf, hadoopConf)
   }
+
+  /**
+    * A client used to interact with the sentry server
+    */
+  lazy val sentryClient = {
+    /*val url = new URL(client.getConf("hive.sentry.conf.url", ""))
+    val newAuthzConf = new HiveAuthzConf(url)
+    SentryServiceClientFactory.create(newAuthzConf)*/
+  }
+
 
   // Exceptions thrown by the hive client that we would like to wrap
   private val clientExceptions = Set(
@@ -73,11 +84,11 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
     classOf[InvocationTargetException].getCanonicalName)
 
   /**
-   * Whether this is an exception thrown by the hive client that should be wrapped.
-   *
-   * Due to classloader isolation issues, pattern matching won't work here so we need
-   * to compare the canonical names of the exceptions, which we assume to be stable.
-   */
+    * Whether this is an exception thrown by the hive client that should be wrapped.
+    *
+    * Due to classloader isolation issues, pattern matching won't work here so we need
+    * to compare the canonical names of the exceptions, which we assume to be stable.
+    */
   private def isClientException(e: Throwable): Boolean = {
     var temp: Class[_] = e.getClass
     var found = false
@@ -89,9 +100,9 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   /**
-   * Run some code involving `client` in a [[synchronized]] block and wrap certain
-   * exceptions thrown in the process in [[AnalysisException]].
-   */
+    * Run some code involving `client` in a [[synchronized]] block and wrap certain
+    * exceptions thrown in the process in [[AnalysisException]].
+    */
   private def withClient[T](body: => T): T = synchronized {
     try {
       body
@@ -109,20 +120,20 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   /**
-   * Get the raw table metadata from hive metastore directly. The raw table metadata may contains
-   * special data source properties and should not be exposed outside of `HiveExternalCatalog`. We
-   * should interpret these special data source properties and restore the original table metadata
-   * before returning it.
-   */
+    * Get the raw table metadata from hive metastore directly. The raw table metadata may contains
+    * special data source properties and should not be exposed outside of `HiveExternalCatalog`. We
+    * should interpret these special data source properties and restore the original table metadata
+    * before returning it.
+    */
   private def getRawTable(db: String, table: String): CatalogTable = withClient {
     client.getTable(db, table)
   }
 
   /**
-   * If the given table properties contains datasource properties, throw an exception. We will do
-   * this check when create or alter a table, i.e. when we try to write table metadata to Hive
-   * metastore.
-   */
+    * If the given table properties contains datasource properties, throw an exception. We will do
+    * this check when create or alter a table, i.e. when we try to write table metadata to Hive
+    * metastore.
+    */
   private def verifyTableProperties(table: CatalogTable): Unit = {
     val invalidKeys = table.properties.keys.filter(_.startsWith(SPARK_SQL_PREFIX))
     if (invalidKeys.nonEmpty) {
@@ -142,24 +153,24 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   // --------------------------------------------------------------------------
 
   override def createDatabase(
-      dbDefinition: CatalogDatabase,
-      ignoreIfExists: Boolean): Unit = withClient {
+                               dbDefinition: CatalogDatabase,
+                               ignoreIfExists: Boolean): Unit = withClient {
     client.createDatabase(dbDefinition, ignoreIfExists)
   }
 
   override def dropDatabase(
-      db: String,
-      ignoreIfNotExists: Boolean,
-      cascade: Boolean): Unit = withClient {
+                             db: String,
+                             ignoreIfNotExists: Boolean,
+                             cascade: Boolean): Unit = withClient {
     client.dropDatabase(db, ignoreIfNotExists, cascade)
   }
 
   /**
-   * Alter a database whose name matches the one specified in `dbDefinition`,
-   * assuming the database exists.
-   *
-   * Note: As of now, this only supports altering database properties!
-   */
+    * Alter a database whose name matches the one specified in `dbDefinition`,
+    * assuming the database exists.
+    *
+    * Note: As of now, this only supports altering database properties!
+    */
   override def alterDatabase(dbDefinition: CatalogDatabase): Unit = withClient {
     val existingDb = getDatabase(dbDefinition.name)
     if (existingDb.properties == dbDefinition.properties) {
@@ -179,6 +190,22 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def listDatabases(): Seq[String] = withClient {
+   /* val result = ArrayBuffer[String]()
+    val tables = new HashMap[String, TSentryRole]
+    val user = UserGroupInformation.getCurrentUser().getShortUserName
+    val roles = sentryClient.listRoles(user)
+    val rolesIter = roles.iterator()
+    while(rolesIter.hasNext) {
+      val role = rolesIter.next()
+      val allPriIter = sentryClient.listAllPrivilegesByRoleName(user, role.getRoleName).iterator()
+      while(allPriIter.hasNext) {
+        val privilege = allPriIter.next()
+        tables(privilege.getDbName) = role
+        client.listDatabases(privilege.getDbName).foreach(x => result += x )
+      }
+
+    }
+    result.toSeq*/
     client.listDatabases("*")
   }
 
@@ -195,8 +222,8 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   // --------------------------------------------------------------------------
 
   override def createTable(
-      tableDefinition: CatalogTable,
-      ignoreIfExists: Boolean): Unit = withClient {
+                            tableDefinition: CatalogTable,
+                            ignoreIfExists: Boolean): Unit = withClient {
     assert(tableDefinition.identifier.database.isDefined)
     val db = tableDefinition.identifier.database.get
     val table = tableDefinition.identifier.table
@@ -366,11 +393,11 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   /**
-   * Data source tables may be non Hive compatible and we need to store table metadata in table
-   * properties to workaround some Hive metastore limitations.
-   * This method puts table schema, partition column names, bucket specification into a map, which
-   * can be used as table properties later.
-   */
+    * Data source tables may be non Hive compatible and we need to store table metadata in table
+    * properties to workaround some Hive metastore limitations.
+    * This method puts table schema, partition column names, bucket specification into a map, which
+    * can be used as table properties later.
+    */
   private def tableMetaToTableProps(table: CatalogTable): mutable.Map[String, String] = {
     val partitionColumns = table.partitionColumnNames
     val bucketSpec = table.bucketSpec
@@ -457,10 +484,10 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def dropTable(
-      db: String,
-      table: String,
-      ignoreIfNotExists: Boolean,
-      purge: Boolean): Unit = withClient {
+                          db: String,
+                          table: String,
+                          ignoreIfNotExists: Boolean,
+                          purge: Boolean): Unit = withClient {
     requireDbExists(db)
     client.dropTable(db, table, ignoreIfNotExists, purge)
   }
@@ -495,8 +522,8 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   private def updateLocationInStorageProps(
-      table: CatalogTable,
-      newPath: Option[String]): CatalogStorageFormat = {
+                                            table: CatalogTable,
+                                            newPath: Option[String]): CatalogStorageFormat = {
     // We can't use `filterKeys` here, as the map returned by `filterKeys` is not serializable,
     // while `CatalogTable` should be serializable.
     val propsWithoutPath = table.storage.properties.filter {
@@ -506,12 +533,12 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   /**
-   * Alter a table whose name that matches the one specified in `tableDefinition`,
-   * assuming the table exists.
-   *
-   * Note: As of now, this doesn't support altering table schema, partition column names and bucket
-   * specification. We will ignore them even if users do specify different values for these fields.
-   */
+    * Alter a table whose name that matches the one specified in `tableDefinition`,
+    * assuming the table exists.
+    *
+    * Note: As of now, this doesn't support altering table schema, partition column names and bucket
+    * specification. We will ignore them even if users do specify different values for these fields.
+    */
   override def alterTable(tableDefinition: CatalogTable): Unit = withClient {
     assert(tableDefinition.identifier.database.isDefined)
     val db = tableDefinition.identifier.database.get
@@ -633,12 +660,12 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   /**
-   * Restores table metadata from the table properties if it's a datasouce table. This method is
-   * kind of a opposite version of [[createTable]].
-   *
-   * It reads table schema, provider, partition column names and bucket specification from table
-   * properties, and filter out these special entries from table properties.
-   */
+    * Restores table metadata from the table properties if it's a datasouce table. This method is
+    * kind of a opposite version of [[createTable]].
+    *
+    * It reads table schema, provider, partition column names and bucket specification from table
+    * properties, and filter out these special entries from table properties.
+    */
   private def restoreTableMetadata(inputTable: CatalogTable): CatalogTable = {
     if (conf.get(DEBUG_MODE)) {
       return inputTable
@@ -759,11 +786,11 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def loadTable(
-      db: String,
-      table: String,
-      loadPath: String,
-      isOverwrite: Boolean,
-      holdDDLTime: Boolean): Unit = withClient {
+                          db: String,
+                          table: String,
+                          loadPath: String,
+                          isOverwrite: Boolean,
+                          holdDDLTime: Boolean): Unit = withClient {
     requireTableExists(db, table)
     client.loadTable(
       loadPath,
@@ -773,13 +800,13 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def loadPartition(
-      db: String,
-      table: String,
-      loadPath: String,
-      partition: TablePartitionSpec,
-      isOverwrite: Boolean,
-      holdDDLTime: Boolean,
-      inheritTableSpecs: Boolean): Unit = withClient {
+                              db: String,
+                              table: String,
+                              loadPath: String,
+                              partition: TablePartitionSpec,
+                              isOverwrite: Boolean,
+                              holdDDLTime: Boolean,
+                              inheritTableSpecs: Boolean): Unit = withClient {
     requireTableExists(db, table)
 
     val orderedPartitionSpec = new util.LinkedHashMap[String, String]()
@@ -802,13 +829,13 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def loadDynamicPartitions(
-      db: String,
-      table: String,
-      loadPath: String,
-      partition: TablePartitionSpec,
-      replace: Boolean,
-      numDP: Int,
-      holdDDLTime: Boolean): Unit = withClient {
+                                      db: String,
+                                      table: String,
+                                      loadPath: String,
+                                      partition: TablePartitionSpec,
+                                      replace: Boolean,
+                                      numDP: Int,
+                                      holdDDLTime: Boolean): Unit = withClient {
     requireTableExists(db, table)
 
     val orderedPartitionSpec = new util.LinkedHashMap[String, String]()
@@ -851,22 +878,22 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   // get from the metastore are always lower cased. We should restore them w.r.t. the actual table
   // partition columns.
   private def restorePartitionSpec(
-      spec: TablePartitionSpec,
-      partColMap: Map[String, String]): TablePartitionSpec = {
+                                    spec: TablePartitionSpec,
+                                    partColMap: Map[String, String]): TablePartitionSpec = {
     spec.map { case (k, v) => partColMap(k.toLowerCase) -> v }
   }
 
   private def restorePartitionSpec(
-      spec: TablePartitionSpec,
-      partCols: Seq[String]): TablePartitionSpec = {
+                                    spec: TablePartitionSpec,
+                                    partCols: Seq[String]): TablePartitionSpec = {
     spec.map { case (k, v) => partCols.find(_.equalsIgnoreCase(k)).get -> v }
   }
 
   override def createPartitions(
-      db: String,
-      table: String,
-      parts: Seq[CatalogTablePartition],
-      ignoreIfExists: Boolean): Unit = withClient {
+                                 db: String,
+                                 table: String,
+                                 parts: Seq[CatalogTablePartition],
+                                 ignoreIfExists: Boolean): Unit = withClient {
     requireTableExists(db, table)
 
     val tableMeta = getTable(db, table)
@@ -887,22 +914,22 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def dropPartitions(
-      db: String,
-      table: String,
-      parts: Seq[TablePartitionSpec],
-      ignoreIfNotExists: Boolean,
-      purge: Boolean,
-      retainData: Boolean): Unit = withClient {
+                               db: String,
+                               table: String,
+                               parts: Seq[TablePartitionSpec],
+                               ignoreIfNotExists: Boolean,
+                               purge: Boolean,
+                               retainData: Boolean): Unit = withClient {
     requireTableExists(db, table)
     client.dropPartitions(
       db, table, parts.map(lowerCasePartitionSpec), ignoreIfNotExists, purge, retainData)
   }
 
   override def renamePartitions(
-      db: String,
-      table: String,
-      specs: Seq[TablePartitionSpec],
-      newSpecs: Seq[TablePartitionSpec]): Unit = withClient {
+                                 db: String,
+                                 table: String,
+                                 specs: Seq[TablePartitionSpec],
+                                 newSpecs: Seq[TablePartitionSpec]): Unit = withClient {
     client.renamePartitions(
       db, table, specs.map(lowerCasePartitionSpec), newSpecs.map(lowerCasePartitionSpec))
 
@@ -933,9 +960,9 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def alterPartitions(
-      db: String,
-      table: String,
-      newParts: Seq[CatalogTablePartition]): Unit = withClient {
+                                db: String,
+                                table: String,
+                                newParts: Seq[CatalogTablePartition]): Unit = withClient {
     val lowerCasedParts = newParts.map(p => p.copy(spec = lowerCasePartitionSpec(p.spec)))
     // Note: Before altering table partitions in Hive, you *must* set the current database
     // to the one that contains the table of interest. Otherwise you will end up with the
@@ -946,32 +973,32 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def getPartition(
-      db: String,
-      table: String,
-      spec: TablePartitionSpec): CatalogTablePartition = withClient {
+                             db: String,
+                             table: String,
+                             spec: TablePartitionSpec): CatalogTablePartition = withClient {
     val part = client.getPartition(db, table, lowerCasePartitionSpec(spec))
     part.copy(spec = restorePartitionSpec(part.spec, getTable(db, table).partitionColumnNames))
   }
 
   /**
-   * Returns the specified partition or None if it does not exist.
-   */
+    * Returns the specified partition or None if it does not exist.
+    */
   override def getPartitionOption(
-      db: String,
-      table: String,
-      spec: TablePartitionSpec): Option[CatalogTablePartition] = withClient {
+                                   db: String,
+                                   table: String,
+                                   spec: TablePartitionSpec): Option[CatalogTablePartition] = withClient {
     client.getPartitionOption(db, table, lowerCasePartitionSpec(spec)).map { part =>
       part.copy(spec = restorePartitionSpec(part.spec, getTable(db, table).partitionColumnNames))
     }
   }
 
   /**
-   * Returns the partition names from hive metastore for a given table in a database.
-   */
+    * Returns the partition names from hive metastore for a given table in a database.
+    */
   override def listPartitionNames(
-      db: String,
-      table: String,
-      partialSpec: Option[TablePartitionSpec] = None): Seq[String] = withClient {
+                                   db: String,
+                                   table: String,
+                                   partialSpec: Option[TablePartitionSpec] = None): Seq[String] = withClient {
     val catalogTable = getTable(db, table)
     val partColNameMap = buildLowerCasePartColNameMap(catalogTable).mapValues(escapePathName)
     val clientPartitionNames =
@@ -985,12 +1012,12 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   /**
-   * Returns the partitions from hive metastore for a given table in a database.
-   */
+    * Returns the partitions from hive metastore for a given table in a database.
+    */
   override def listPartitions(
-      db: String,
-      table: String,
-      partialSpec: Option[TablePartitionSpec] = None): Seq[CatalogTablePartition] = withClient {
+                               db: String,
+                               table: String,
+                               partialSpec: Option[TablePartitionSpec] = None): Seq[CatalogTablePartition] = withClient {
     val partColNameMap = buildLowerCasePartColNameMap(getTable(db, table))
     client.getPartitions(db, table, partialSpec.map(lowerCasePartitionSpec)).map { part =>
       part.copy(spec = restorePartitionSpec(part.spec, partColNameMap))
@@ -998,9 +1025,9 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   }
 
   override def listPartitionsByFilter(
-      db: String,
-      table: String,
-      predicates: Seq[Expression]): Seq[CatalogTablePartition] = withClient {
+                                       db: String,
+                                       table: String,
+                                       predicates: Seq[Expression]): Seq[CatalogTablePartition] = withClient {
     val rawTable = getRawTable(db, table)
     val catalogTable = restoreTableMetadata(rawTable)
     val partitionColumnNames = catalogTable.partitionColumnNames.toSet
@@ -1009,8 +1036,8 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
     }
 
     if (nonPartitionPruningPredicates.nonEmpty) {
-        sys.error("Expected only partition pruning predicates: " +
-          predicates.reduceLeft(And))
+      sys.error("Expected only partition pruning predicates: " +
+        predicates.reduceLeft(And))
     }
 
     val partitionSchema = catalogTable.partitionSchema
@@ -1039,8 +1066,8 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
   // --------------------------------------------------------------------------
 
   override def createFunction(
-      db: String,
-      funcDefinition: CatalogFunction): Unit = withClient {
+                               db: String,
+                               funcDefinition: CatalogFunction): Unit = withClient {
     requireDbExists(db)
     // Hive's metastore is case insensitive. However, Hive's createFunction does
     // not normalize the function name (unlike the getFunction part). So,
@@ -1106,10 +1133,10 @@ object HiveExternalCatalog {
   val TABLE_PARTITION_PROVIDER_FILESYSTEM = "filesystem"
 
   /**
-   * Returns the fully qualified name used in table properties for a particular column stat.
-   * For example, for column "mycol", and "min" stat, this should return
-   * "spark.sql.statistics.colStats.mycol.min".
-   */
+    * Returns the fully qualified name used in table properties for a particular column stat.
+    * For example, for column "mycol", and "min" stat, this should return
+    * "spark.sql.statistics.colStats.mycol.min".
+    */
   private def columnStatKeyPropName(columnName: String, statKey: String): String = {
     STATISTICS_COL_STATS_PREFIX + columnName + "." + statKey
   }
@@ -1149,9 +1176,9 @@ object HiveExternalCatalog {
   }
 
   private def getColumnNamesByType(
-      props: Map[String, String],
-      colType: String,
-      typeName: String): Seq[String] = {
+                                    props: Map[String, String],
+                                    colType: String,
+                                    typeName: String): Seq[String] = {
     for {
       numCols <- props.get(s"spark.sql.sources.schema.num${colType.capitalize}Cols").toSeq
       index <- 0 until numCols.toInt

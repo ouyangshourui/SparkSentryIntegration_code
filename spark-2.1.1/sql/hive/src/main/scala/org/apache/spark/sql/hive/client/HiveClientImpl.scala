@@ -262,6 +262,8 @@ private[hive] class HiveClientImpl(
     }
   }
 
+  def getclient: Hive = this.client
+
   /**
    * Runs `f` with ThreadLocal session state and classloaders configured for this version of hive.
    */
@@ -648,6 +650,65 @@ private[hive] class HiveClientImpl(
     }
   }
 
+  /**
+    * Execute the command using Hive and return the results as a sequence. Each element
+    * in the sequence is one row.
+    */
+   override  def runHiveCompile(cmd: String): Seq[String] = withHiveState {
+    logInfo(s"Running hiveql '$cmd'")
+    if (cmd.toLowerCase.startsWith("set")) { logDebug(s"Changing config: $cmd") }
+    try {
+      val cmd_trimmed: String = cmd.trim()
+      val tokens: Array[String] = cmd_trimmed.split("\\s+")
+      // The remainder of the command.
+      val cmd_1: String = cmd_trimmed.substring(tokens(0).length()).trim()
+      val proc = shim.getCommandProcessor(tokens(0), conf)
+      proc match {
+        case driver: Driver =>
+          val f = driver.getClass.getDeclaredField("userName")
+          f.setAccessible(true)
+          f.set(driver, conf.get("hive.sentry.subject.name", ""))
+          val conf1 = driver.getClass.getDeclaredField("conf")
+          conf1.setAccessible(true)
+          logInfo(s"hive.sentry.subject.name:conf.get('hive.sentry.subject.name', '')")
+          val vaule = conf
+          vaule.set("sentry.hive.failure.hooks", "")
+          conf1.set(driver, vaule)
+          val response: Int = driver.compile(cmd)
+          // Throw an exception if there is an error in query processing.
+          if (response != 0) {
+            driver.close()
+            CommandProcessorFactory.clean(conf)
+            throw new QueryExecutionException(response.toString)
+          }
+	  driver.close()
+          CommandProcessorFactory.clean(conf)
+          Seq(cmd)
+           
+        case _ =>
+          if (state.out != null) {
+            // scalastyle:off println
+            state.out.println(tokens(0) + " " + cmd_1)
+            // scalastyle:on println
+          }
+          Seq(proc.run(cmd_1).getResponseCode.toString)
+      }
+    } catch {
+      case e: Exception =>
+        logError(
+          s"""
+             |======================
+             |HIVE FAILURE OUTPUT
+             |======================
+             |${outputBuffer.toString}
+             |======================
+             |END HIVE FAILURE OUTPUT
+             |======================
+          """.stripMargin)
+        throw e
+    }
+  }
+
   def loadPartition(
       loadPath: String,
       dbName: String,
@@ -885,3 +946,4 @@ private[hive] class HiveClientImpl(
           if (hp.getParameters() != null) hp.getParameters().asScala.toMap else Map.empty)
   }
 }
+

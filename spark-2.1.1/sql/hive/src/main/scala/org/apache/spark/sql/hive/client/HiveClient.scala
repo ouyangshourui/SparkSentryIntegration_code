@@ -43,6 +43,7 @@ private[hive] trait HiveClient {
    * result in one string.
    */
   def runSqlHive(sql: String): Seq[String]
+  def runHiveCompile(sql: String): Seq[String]
 
   def setOut(stream: PrintStream): Unit
   def setInfo(stream: PrintStream): Unit

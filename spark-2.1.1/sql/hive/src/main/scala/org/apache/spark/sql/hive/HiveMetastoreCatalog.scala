@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.hive
 
+import org.apache.spark.sql.hive.client.HiveClientImpl
+
 import scala.util.control.NonFatal
 
 import com.google.common.cache.{CacheBuilder, CacheLoader, LoadingCache}
@@ -352,10 +354,49 @@ private[hive] class HiveMetastoreCatalog(sparkSession: SparkSession) extends Log
   }
 
   /**
+    * when spark with sentry, we nend to check premission
+    */
+  object SentryPermissionCheck extends Rule[LogicalPlan] {
+
+    val hiveclient = sparkSession.sharedState.externalCatalog
+      .asInstanceOf[HiveExternalCatalog].client
+
+    val sentryEabled = sparkSession.sharedState.sparkContext.conf
+                       .get("spark.sentry.enabled", "false").toBoolean
+
+    override def apply(plan: LogicalPlan): LogicalPlan = {
+      if (!plan.resolved || plan.analyzed) {
+        return plan
+      }
+      plan transformUp {
+        // Write path
+        case InsertIntoTable(r: MetastoreRelation, partition, child, overwrite, ifNotExists)
+          if (sentryEabled) =>
+          val tablename = r.databaseName + "." + r.tableName
+          val sql = String.format("insert overwrite table %s select * from %s limit 1"
+            , tablename, tablename)
+          this.hiveclient.runHiveCompile(sql)
+          new Exception("SentryPermissionCheck InsertIntoTable").printStackTrace()
+          InsertIntoTable(r, partition, child, overwrite, ifNotExists)
+
+        // Read path
+        case relation: MetastoreRelation  if (sentryEabled) =>
+          val tablename = relation.databaseName + "." + relation.tableName
+          val sql = String.format("select * from %s limit 1", tablename)
+          this.hiveclient.runHiveCompile(sql)
+          new Exception("SentryPermissionCheck MetastoreRelation").printStackTrace()
+          SubqueryAlias(relation.tableName, relation, None)
+      }
+    }
+  }
+
+
+  /**
    * When scanning or writing to non-partitioned Metastore Parquet tables, convert them to Parquet
    * data source relations for better performance.
    */
   object ParquetConversions extends Rule[LogicalPlan] {
+
     private def shouldConvertMetastoreParquet(relation: MetastoreRelation): Boolean = {
       relation.tableDesc.getSerdeClassName.toLowerCase.contains("parquet") &&
         sessionState.convertMetastoreParquet
@@ -456,3 +497,4 @@ private[hive] object HiveMetastoreCatalog {
       throw new SparkException(msg)
   }
 }
+

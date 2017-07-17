@@ -90,6 +90,7 @@ private[sql] class HiveSessionCatalog(
 
   val ParquetConversions: Rule[LogicalPlan] = metastoreCatalog.ParquetConversions
   val OrcConversions: Rule[LogicalPlan] = metastoreCatalog.OrcConversions
+  val SentryPermissionCheck: Rule[LogicalPlan] = metastoreCatalog.SentryPermissionCheck
 
   override def refreshTable(name: TableIdentifier): Unit = {
     super.refreshTable(name)
