@@ -65,7 +65,9 @@ private[security] class HiveCredentialProvider extends ServiceCredentialProvider
       sparkConf: SparkConf,
       creds: Credentials): Option[Long] = {
     val conf = hiveConf(hadoopConf)
-
+    val sentryurl = conf.getTrimmed("hive.sentry.conf.url", "")
+    require(sentryurl.nonEmpty, "sentryurl uri undefined")
+    println("hive.sentry.conf.url:"+ sentryurl)
     val principalKey = "hive.metastore.kerberos.principal"
     val principal = conf.getTrimmed(principalKey, "")
     require(principal.nonEmpty, s"Hive principal $principalKey undefined")
@@ -88,7 +90,17 @@ private[security] class HiveCredentialProvider extends ServiceCredentialProvider
       val getHive = hiveClass.getMethod("get", hiveConfClass)
 
       doAsRealUser {
-        val hive = getHive.invoke(null, conf)
+        //val hive = getHive.invoke(null, conf)
+	 val hive = {
+          if (sparkConf.get("spark.sentry.enabled", "false").toBoolean) {
+            logInfo("spark.sentry.enabled")
+            val sessionClass = mirror.classLoader
+              .loadClass("org.apache.hadoop.hive.ql.session.SessionState")
+            val startMethod = sessionClass.getMethod("start", hiveConfClass)
+            startMethod.invoke(null, conf)
+          }
+          getHive.invoke(null, conf)
+         }
         val tokenStr = getDelegationToken.invoke(hive, currentUser.getUserName(), principal)
           .asInstanceOf[String]
         val hive2Token = new Token[DelegationTokenIdentifier]()
