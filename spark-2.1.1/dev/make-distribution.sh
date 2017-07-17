@@ -32,7 +32,7 @@ set -x
 SPARK_HOME="$(cd "`dirname "$0"`/.."; pwd)"
 DISTDIR="$SPARK_HOME/dist"
 
-MAKE_TGZ=false
+MAKE_TGZ=true
 MAKE_PIP=false
 MAKE_R=false
 NAME=none
