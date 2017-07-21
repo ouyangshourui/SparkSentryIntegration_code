@@ -62,6 +62,10 @@ object Main extends Logging {
       "-classpath", jars
     ) ++ args.toList
 
+    val username = System.getProperty( "hive.sentry.subject.name" )
+    conf.set("hive.sentry.subject.name", username)
+    println(s"****username  = $username*****")
+    
     val settings = new GenericRunnerSettings(scalaOptionError)
     settings.processArguments(interpArguments, true)
 
@@ -113,3 +117,4 @@ object Main extends Logging {
   }
 
 }
+
