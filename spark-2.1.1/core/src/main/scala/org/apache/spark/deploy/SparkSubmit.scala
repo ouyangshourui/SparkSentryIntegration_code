@@ -723,7 +723,24 @@ object SparkSubmit {
     if (classOf[scala.App].isAssignableFrom(mainClass)) {
       printWarning("Subclasses of scala.App may not work correctly. Use a main() method instead.")
     }
+    
+    println("***********submit start *************")
+    val currenturl = Thread.currentThread.getContextClassLoader.getResource("")
+    val dir = new java.io.File(currenturl.getFile())
+    if (dir.isDirectory) {
+      dir.listFiles().foreach(x => println(x.getName.toString))
+    }
+    println("*************submit end **********")
 
+    System.setProperty("hive.sentry.subject.name",
+      UserGroupInformation.getCurrentUser().getShortUserName)
+    System.setProperty("user.name",
+      UserGroupInformation.getCurrentUser().getShortUserName)
+
+    val keytab = Thread.currentThread.getContextClassLoader
+      .getResource("hive.keytab").getPath
+    UserGroupInformation.loginUserFromKeytab("hive", keytab)
+    println(s"*************mainclass is ${mainClass.getName}**********")
     val mainMethod = mainClass.getMethod("main", new Array[String](0).getClass)
     if (!Modifier.isStatic(mainMethod.getModifiers)) {
       throw new IllegalStateException("The main method in the given main class must be static")
@@ -1117,3 +1134,4 @@ private case class OptionAssigner(
     deployMode: Int,
     clOption: String = null,
     sysProp: String = null)
+
