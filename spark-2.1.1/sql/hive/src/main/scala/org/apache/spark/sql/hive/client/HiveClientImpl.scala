@@ -18,6 +18,8 @@
 package org.apache.spark.sql.hive.client
 
 import java.io.{File, PrintStream}
+import java.lang.reflect.UndeclaredThrowableException
+import java.security.PrivilegedExceptionAction
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
@@ -103,6 +105,8 @@ private[hive] class HiveClientImpl(
     // Switch to the initClassLoader.
     Thread.currentThread().setContextClassLoader(initClassLoader)
 
+
+
     // Set up kerberos credentials for UserGroupInformation.loginUser within
     // current class loader
     if (sparkConf.contains("spark.yarn.principal") && sparkConf.contains("spark.yarn.keytab")) {
@@ -117,6 +121,7 @@ private[hive] class HiveClientImpl(
         UserGroupInformation.loginUserFromKeytab(principalName, keytabFileName)
       }
     }
+
 
     def isCliSessionState(state: SessionState): Boolean = {
       var temp: Class[_] = if (state != null) state.getClass else null
@@ -139,6 +144,7 @@ private[hive] class HiveClientImpl(
         originalState
       } else {
         val hiveConf = new HiveConf(classOf[SessionState])
+
         // 1: we set all confs in the hadoopConf to this hiveConf.
         // This hadoopConf contains user settings in Hadoop's core-site.xml file
         // and Hive's hive-site.xml file. Note, we load hive-site.xml file manually in
@@ -181,7 +187,82 @@ private[hive] class HiveClientImpl(
           }
           hiveConf.set(k, v)
         }
-        val state = new SessionState(hiveConf)
+
+        // 4: we set sentry url on yarn cluster mode in working directory
+        var username : String = null
+        if("cluster".equals(sparkConf.get("spark.submit.deployMode"))) {
+          val yarnkeytab = sparkConf.contains("spark.yarn.keytab")
+          val yarnprincipal = sparkConf.contains("spark.yarn.principal")
+
+          val oldurl = hiveConf.get("hive.sentry.conf.url", "")
+          logInfo(s"master is yarn-cluster," +
+            s"HiveClientImpl orgin hiveconf configure hive.sentry.conf.url:" +
+            s" ${oldurl}")
+          val url = Thread.currentThread.getContextClassLoader.getResource("sentry-site.xml")
+          val currenturl = Thread.currentThread.getContextClassLoader.getResource("")
+          val dir = new java.io.File(currenturl.getFile())
+          if (dir.isDirectory) {
+            dir.listFiles().foreach(x => logInfo(x.getAbsoluteFile.getPath))
+          }
+          System.getProperty("java.class.path").split(":").foreach(x => logInfo(x))
+          hiveConf.set("hive.sentry.conf.url", url.toString)
+          logInfo(s"master is yarn-cluster," +
+            s"HiveClientImpl  new hiveconf configure hive.sentry.conf.url: ${url}")
+          // hiveConf.addResource("")
+          logInfo("begion hiveconf all properties")
+
+
+           // hiveConf.getAllProperties.asScala.foreach{ case (k, v) =>
+           // logInfo(s"$k = $v")
+           // }
+           // logInfo("begion hiveconf all properties")
+
+          try {
+            Thread.currentThread.getContextClassLoader
+              .loadClass("org.apache.sentry.binding.metastore.SentryMetaStoreFilterHook")
+          } catch {
+            case e : Exception => e.printStackTrace()
+          }
+
+          username = UserGroupInformation.getCurrentUser.getShortUserName
+          logInfo(s"****UserGroupInformation.getCurrentUser.getShortUserName  = $username*****")
+          logInfo(s"****UserGroupInformation.getCurrentUser.UserName " +
+            s"= ${UserGroupInformation.getCurrentUser.getUserName}*****")
+
+          logInfo(s"****UserGroupInformation.isLoginKeytabBased " +
+            s"= ${UserGroupInformation.isLoginKeytabBased}*****")
+
+          logInfo(s"****UserGroupInformation.isSecurityEnabled " +
+            s"= ${UserGroupInformation.isSecurityEnabled}*****")
+
+           // get hive.sentry.subject.name
+           // val shortuserName = UserGroupInformation.getLoginUser.getShortUserName
+           // hiveConf.set("hive.sentry.subject.name", shortuserName)
+
+           // change Login user to hive
+           val keytab = Thread.currentThread.getContextClassLoader
+              .getResource("hive.keytab").getPath
+            UserGroupInformation.loginUserFromKeytab("hive", keytab)
+
+
+          logInfo(s"****UserGroupInformation.getCurrentUser.UserName " +
+            s"= ${UserGroupInformation.getCurrentUser.getUserName}*****")
+
+          logInfo(s"****UserGroupInformation.isLoginKeytabBased " +
+            s"= ${UserGroupInformation.isLoginKeytabBased}*****")
+
+          logInfo(s"****UserGroupInformation.isSecurityEnabled " +
+            s"= ${UserGroupInformation.isSecurityEnabled}*****")
+
+
+        }
+
+        username = System.getProperty( "hive.sentry.subject.name" )
+        logInfo(s"****username  = $username*****")
+        hiveConf.set("hive.sentry.subject.name", username)
+
+        val state = new SessionState(hiveConf, username)
+
         if (clientLoader.cachedHive != null) {
           Hive.set(clientLoader.cachedHive.asInstanceOf[Hive])
         }
@@ -667,12 +748,17 @@ private[hive] class HiveClientImpl(
         case driver: Driver =>
           val f = driver.getClass.getDeclaredField("userName")
           f.setAccessible(true)
-          f.set(driver, conf.get("hive.sentry.subject.name", ""))
+
+          val subjectName = System.getProperty( "hive.sentry.subject.name" )
+
+          logInfo(s"*********** runHiveCompile hive.sentry.subject.name:${subjectName}")
+          f.set(driver, subjectName )
+          System.getProperty("java.class.path").split(":").foreach(x => logInfo(x))
           val conf1 = driver.getClass.getDeclaredField("conf")
           conf1.setAccessible(true)
-          logInfo(s"hive.sentry.subject.name:conf.get('hive.sentry.subject.name', '')")
           val vaule = conf
           vaule.set("sentry.hive.failure.hooks", "")
+          vaule.setClassLoader(initClassLoader)
           conf1.set(driver, vaule)
           val response: Int = driver.compile(cmd)
           // Throw an exception if there is an error in query processing.
@@ -681,10 +767,10 @@ private[hive] class HiveClientImpl(
             CommandProcessorFactory.clean(conf)
             throw new QueryExecutionException(response.toString)
           }
-	  driver.close()
+          driver.close()
           CommandProcessorFactory.clean(conf)
           Seq(cmd)
-           
+
         case _ =>
           if (state.out != null) {
             // scalastyle:off println
