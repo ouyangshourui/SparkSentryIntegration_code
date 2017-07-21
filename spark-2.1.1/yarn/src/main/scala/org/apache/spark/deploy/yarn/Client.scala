@@ -36,7 +36,7 @@ import org.apache.hadoop.fs._
 import org.apache.hadoop.fs.permission.FsPermission
 import org.apache.hadoop.io.DataOutputBuffer
 import org.apache.hadoop.mapreduce.MRJobConfig
-import org.apache.hadoop.security.{Credentials, UserGroupInformation}
+import org.apache.hadoop.security.{UserGroupInformation, Credentials}
 import org.apache.hadoop.util.StringUtils
 import org.apache.hadoop.yarn.api._
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment
@@ -70,7 +70,6 @@ private[spark] class Client(
 
   private val yarnClient = YarnClient.createYarnClient
   private val yarnConf = new YarnConfiguration(hadoopConf)
-
   private val isClusterMode = sparkConf.get("spark.submit.deployMode", "client") == "cluster"
 
   // AM related configurations
@@ -202,6 +201,27 @@ private[spark] class Client(
   }
 
   /**
+    * getFairschedulrQueueName
+    * @return mapreduce.job.queuename
+    */
+  private  def getFairschedulrQueueName(hadoopConf: Configuration): String = {
+    val  queue_name = if (sparkConf.get("spark.sentry.enabled", "false").toBoolean) {
+      // ShimLoader.getHadoopShims.refreshDefaultQueue(sparkConf, username)
+      val ShimLoaderClass = Class.forName("org.apache.hadoop.hive.shims.ShimLoader")
+      val getHadoopShimsMethod = ShimLoaderClass.getMethod("getHadoopShims")
+      val hadoopShims = getHadoopShimsMethod.invoke(null)
+      val stringclass = Class.forName("java.lang.String")
+      val confclass = Class.forName("org.apache.hadoop.conf.Configuration")
+      val refreshDefaultQueueMethod = hadoopShims.getClass.getMethod("refreshDefaultQueue", confclass, stringclass)
+      refreshDefaultQueueMethod.invoke(hadoopShims, hadoopConf, System.getProperty("hive.sentry.subject.name"))
+      val mjq = hadoopConf.get("mapreduce.job.queuename")
+      logInfo(s"******set getFairschedulrQueueName***********mapreduce.job.queuename is ${mjq}")
+      mjq
+      } else "default"
+    queue_name
+  }
+
+  /**
    * Set up the context for submitting our ApplicationMaster.
    * This uses the YarnClientApplication not available in the Yarn alpha API.
    */
@@ -210,7 +230,15 @@ private[spark] class Client(
       containerContext: ContainerLaunchContext): ApplicationSubmissionContext = {
     val appContext = newApp.getApplicationSubmissionContext
     appContext.setApplicationName(sparkConf.get("spark.app.name", "Spark"))
+    logInfo(s"createApplicationSubmissionContext QUEUE_NAME ${sparkConf.get(QUEUE_NAME)}")
+
+    if (sparkConf.get(QUEUE_NAME).equals("default") ) {
+      sparkConf.set("spark.yarn.queue", getFairschedulrQueueName(hadoopConf))
+      appContext.setQueue(getFairschedulrQueueName(hadoopConf))
+    }
     appContext.setQueue(sparkConf.get(QUEUE_NAME))
+    logInfo(s"createApplicationSubmissionContext QUEUE_NAME ${sparkConf.get(QUEUE_NAME)}")
+
     appContext.setAMContainerSpec(containerContext)
     appContext.setApplicationType("SPARK")
 
@@ -1218,6 +1246,9 @@ private object Client extends Logging {
     // Note that any env variable with the SPARK_ prefix gets propagated to all (remote) processes
     System.setProperty("SPARK_YARN_MODE", "true")
     val sparkConf = new SparkConf
+    sparkConf.set("hive.sentry.subject.name", System.getProperty("hive.sentry.subject.name"))
+
+
     // SparkSubmit would use yarn cache to distribute files & jars in yarn mode,
     // so remove them from sparkConf here for yarn mode.
     sparkConf.remove("spark.jars")
@@ -1551,3 +1582,4 @@ private object Client extends Logging {
   }
 
 }
+
