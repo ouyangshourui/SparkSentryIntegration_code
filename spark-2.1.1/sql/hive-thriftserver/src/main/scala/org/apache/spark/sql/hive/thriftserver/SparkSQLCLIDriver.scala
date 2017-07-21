@@ -20,6 +20,8 @@ package org.apache.spark.sql.hive.thriftserver
 import java.io._
 import java.util.{ArrayList => JArrayList, Locale}
 
+import org.apache.hadoop.security.UserGroupInformation
+
 import scala.collection.JavaConverters._
 
 import jline.console.ConsoleReader
@@ -78,8 +80,12 @@ private[hive] object SparkSQLCLIDriver extends Logging {
     if (!oproc.process_stage1(args)) {
       System.exit(1)
     }
-
+    
+    val username = System.getProperty( "hive.sentry.subject.name" )
     val cliConf = new HiveConf(classOf[SessionState])
+    cliConf.set("hive.sentry.subject.name", username)
+    println(s"****username  = $username*****")
+
     // Override the location of the metastore since this is only used for local execution.
     HiveUtils.newTemporaryConfiguration(useInMemoryDerby = false).foreach {
       case (key, value) => cliConf.set(key, value)
@@ -101,6 +107,7 @@ private[hive] object SparkSQLCLIDriver extends Logging {
 
     // Set all properties specified via command line.
     val conf: HiveConf = sessionState.getConf
+
     sessionState.cmdProperties.entrySet().asScala.foreach { item =>
       val key = item.getKey.toString
       val value = item.getValue.toString
@@ -399,4 +406,5 @@ private[hive] class SparkSQLCLIDriver extends CliDriver with Logging {
     }
   }
 }
+
 
